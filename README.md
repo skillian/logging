@@ -37,6 +37,11 @@ logger.Debug4
 ```
 This is to pass an explicit number of message arguments so an `[]interface{}` slice isn't allocated for every log call (for convenience the non-suffixed version of each method uses a varargs-style `[]interface{}` slice).
 
-I wrote this library with allocations in mind.  I try to effectively use `sync.Pool`s to keep old `Event`s and `Event.Args` `[]interface{}` slices cached to prevent allocations wherever possible.  At this point, the only allocations that I am aware of are the varargs of the non-numbered `Debug`, `Info`, etc. methods (or if using a numbered method but there's no existing slice available in the cache), and the Event objects themselves (again if none are available in the pool).
+I wrote this library with allocations in mind.  I try to effectively use `sync.Pool`s to keep old `Event`s and `Event.Args` `[]interface{}` slices cached to prevent allocations wherever possible.  At this point, the only allocations that I am aware of are:
+- Initialization (the Logger struct, any handlers and formatters)
+- the varargs of the non-numbered `Debug`, `Info`, etc. methods (or if using a numbered method but there's no existing slice available in the cache)
+- Event objects themselves (again if none are available in the pool).
+- Boxing non-pointer values passed to the logging methods into `interface{}`s.
+- Possibly when the `[]interface{}` slice is returned in the call to `sync.Pool.Get`. I'm not sure about that one.
 
 This is my first Go project that actually does anything, so please let me know if there are any bugs or design antipatterns, flaws, or "non-idiomatic Go" in the design; I would appreciate feedback from anyone with Golang experience!
