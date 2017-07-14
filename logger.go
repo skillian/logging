@@ -54,10 +54,18 @@ func (L *Logger) SetLevel(level Level) {
 	L.level = level
 }
 
+// LogEvent emits the event to its handlers and then consumes the event.
+// The event must not be used after a call to LogEvent; it is pooled for
+// future use and its values will be overwritten.
 func (L *Logger) LogEvent(event *Event) {
-	for _, h := range L.handlers {
-		h.Emit(event)
+	if event.Level >= L.level {
+		for _, h := range L.handlers {
+			h.Emit(event)
+		}
 	}
+	// Pooling the event might not be a good idea if this logger didn't
+	// handle it.  For now, you should not try to log the same event
+	// to multiple loggers
 	L.poolEvent(event)
 }
 
