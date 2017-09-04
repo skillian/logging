@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 // Handler implementers are sent messages by their owning Logger objects to
@@ -62,10 +63,13 @@ func (ch ConsoleHandler) Emit(event *Event) {
 
 type WriterHandler struct {
 	w io.Writer
+	m sync.Mutex
 	BaseHandler
 }
 
-func (wh WriterHandler) Emit(event *Event) {
+func (wh *WriterHandler) Emit(event *Event) {
+	wh.m.Lock()
+	defer wh.m.Unlock()
 	if event.Level >= wh.level {
 		fmt.Fprintf(wh.w, wh.formatter.Format(event))
 	}
