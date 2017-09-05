@@ -12,16 +12,16 @@ type Level int
 const (
 	// DebugLevel is the lowest severity level.  As its name implies, it should
 	// be restricted to debugging.
-	DebugLevel Level = -20
+	DebugLevel Level = (10 * iota) - 20
 
 	// InfoLevel is for tracking informational messages that are not actual
 	// problems
-	InfoLevel Level = -10
+	InfoLevel
 
 	// WarnLevel is the default severity level and indicates non-critical
 	// problems that the program will work around or otherwise recover from
 	// but should be made aware to the user.
-	WarnLevel Level = 10 * iota
+	WarnLevel
 
 	// ErrorLevel represents errors that the current call-stack / goroutine
 	// cannot work around and will terminate its execution but not necessarily
@@ -45,12 +45,12 @@ var (
 	}
 
 	levelNameToValue = map[string]Level{
-        "debug":    DebugLevel,
-        "info":     InfoLevel,
-        "warn":     WarnLevel,
-        "warning":  WarningLevel,
-        "error":    ErrorLevel,
-    }
+		"debug":	DebugLevel,
+		"info":		InfoLevel,
+		"warn":		WarnLevel,
+		"warning":	WarningLevel,
+		"error":	ErrorLevel,
+	}
 )
 
 // ParseLevel takes an log level name as a string and returns the Level value.
