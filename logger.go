@@ -246,6 +246,11 @@ func (L *Logger) Error4(msg string, arg0, arg1, arg2, arg3 interface{}) {
 	L.log4(ErrorLevel, msg, arg0, arg1, arg2, arg3)
 }
 
+// LogErr logs a pre-built error value.
+func (L *Logger) LogErr(err error) {
+	L.log0(ErrorLevel, err.Error())
+}
+
 //
 // CreateEvents
 //
