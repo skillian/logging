@@ -46,10 +46,19 @@ func createLogger(name string) *Logger {
 	return L
 }
 
+// AddHandler adds a logging handler to the logger.
+// Handlers cannot be removed from a logger.
 func (L *Logger) AddHandler(h Handler) {
 	L.handlers = append(L.handlers, h)
 }
 
+// Level gets the logger's logging level.  Events below the
+// logger's Level threshold won't be logged to the Handlers.
+func (L *Logger) Level() Level {
+	return L.level
+}
+
+// SetLevel sets the logger's logging level.
 func (L *Logger) SetLevel(level Level) {
 	L.level = level
 }
