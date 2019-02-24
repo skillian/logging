@@ -10,9 +10,14 @@ import (
 type Level int
 
 const (
-	// DebugLevel is the lowest severity level.  As its name implies, it should
-	// be restricted to debugging.
-	DebugLevel Level = (10 * iota) - 20
+	// VerboseLevel is the lowest logging level.  As its definition implies, it
+	// produces far more detailed information than necessary and should be
+	// reserved for only the most obscure debugging
+	VerboseLevel Level = (10 * iota) - 30
+
+	// DebugLevel is the lowest practical severity level.  As its name implies,
+	// it should be restricted to debugging.
+	DebugLevel
 
 	// InfoLevel is for tracking informational messages that are not actual
 	// problems
@@ -38,6 +43,7 @@ const (
 
 var (
 	levelValueToName = map[Level]string{
+		VerboseLevel: "Verbose",
 		DebugLevel: "Debug",
 		InfoLevel: "Info",
 		WarnLevel: "Warning",
@@ -45,6 +51,7 @@ var (
 	}
 
 	levelNameToValue = map[string]Level{
+		"verbose":      VerboseLevel,
 		"debug":	DebugLevel,
 		"info":		InfoLevel,
 		"warn":		WarnLevel,
@@ -77,23 +84,29 @@ type Event struct {
 	// The name field is used by the Formatter and then the Handler to format
 	// and write the event, respectively.
 	Name string
+
 	// Time stores the time that the event occurred.
 	Time time.Time
 	// Level stores the event's logging level so that handlers within the
 	// logger can chose whether or not to log the event based on their
 	// configuration.
+
 	Level Level
 	// Msg stores the unformatted message within the event.  Only the
 	// formatters used in the handlers that "want" the message format them
 	// with the Event's Args.
 	Msg string
+
 	// Args holds the formatting parameters to the message in Msg.
 	Args []interface{}
+
 	// FuncName holds the name of the function where the event came from.
 	// Imagine that.
 	FuncName string
+
 	// File holds the filename of the function where the event happened.
 	File string
+
 	// Line holds the line number within the file where the error occurred.
 	Line int
 }
