@@ -14,10 +14,16 @@ type Formatter interface {
 	Format(event *Event) string
 }
 
-// DefaultFormatter's Format Sprintf's all of the information within its
-// provided Event in an arbitrarily decided format that *I* just happen to like.
+// FormatterFunc implements the Formatter interface through a single function.
+type FormatterFunc func(e *Event) string
+
+// Format implements Formatter by calling the format message.
+func (f FormatterFunc) Format(e *Event) string { return f(e) }
+
+// DefaultFormatter Sprintf's all of the information within its provided Event
+// in an arbitrarily decided format that *I* just happen to like.
 // Your mileage may vary.
-type DefaultFormatter struct {}
+type DefaultFormatter struct{}
 
 // Format returns the event with the following layout:
 //
@@ -26,7 +32,7 @@ func (f DefaultFormatter) Format(event *Event) string {
 	year, month, day := event.Time.Date()
 	hour, minute, second := event.Time.Clock()
 	levelString := event.Level.String()
-	rightAlignedLevel := strings.Repeat(" ", 8 - len(levelString)) + levelString
+	rightAlignedLevel := strings.Repeat(" ", 8-len(levelString)) + levelString
 	return fmt.Sprintf(
 		"%d-%02d-%02d %02d:%02d:%02d:  %s:  %s:  at %s in %s, line %d:  %s\n",
 		year, month, day, hour, minute, second,
