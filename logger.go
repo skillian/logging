@@ -3,16 +3,18 @@ package logging
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 // Logger objects expose methods to log events to added handlers if the event
 // exceeds the logger's log level.
 type Logger struct {
-	name     string
-	level    Level
-	handlers []Handler
-	pools    logPool
+	name           string
+	level          Level
+	handlersUnsafe *[]Handler
+	pools          logPool
 }
 
 type logPool struct {
@@ -43,7 +45,10 @@ func GetLogger(name string) *Logger {
 }
 
 func createLogger(name string) *Logger {
-	L := &Logger{name: name}
+	L := &Logger{
+		name:           name,
+		handlersUnsafe: new([]Handler),
+	}
 	L.pools.logEventPool.New = logEventAllocator
 	for i := 0; i < len(L.pools.argsPools); i++ {
 		L.pools.argsPools[i].New = getInterfaceSliceAllocator(i + 1)
@@ -51,33 +56,83 @@ func createLogger(name string) *Logger {
 	return L
 }
 
-// AddHandler adds a logging handler to the logger.  It is not currently
-// possible to remove handlers from the logger.
-func (L *Logger) AddHandler(h Handler) {
-	L.handlers = append(L.handlers, h)
+// AddHandler adds a single logging handler to the logger.
+func (L *Logger) AddHandler(h Handler) { L.AddHandlers(h) }
+
+// AddHandlers adds handlers to the logger.  This function is threadsafe.
+func (L *Logger) AddHandlers(hs ...Handler) {
+	if len(hs) == 0 {
+		return
+	}
+	newHandlers := new([]Handler)
+	for {
+		oldHandlers := L.handlersPtr()
+		*newHandlers = make([]Handler, len(*oldHandlers)+len(hs))
+		copy(*newHandlers, *oldHandlers)
+		copy((*newHandlers)[len(*oldHandlers):], hs)
+		if L.casHandlers(oldHandlers, newHandlers) {
+			return
+		}
+	}
+}
+
+func (L *Logger) handlersPtr() *[]Handler {
+	addr := (*unsafe.Pointer)(unsafe.Pointer(&L.handlersUnsafe))
+	return (*[]Handler)(atomic.LoadPointer(addr))
+}
+
+func (L *Logger) casHandlers(old, new *[]Handler) bool {
+	addr := (*unsafe.Pointer)(unsafe.Pointer(&L.handlersUnsafe))
+	return atomic.CompareAndSwapPointer(
+		addr,
+		unsafe.Pointer(old),
+		unsafe.Pointer(new),
+	)
+}
+
+// RemoveHandlers removes the given list of handlers from the logger.
+func (L *Logger) RemoveHandlers(hs ...Handler) {
+	if len(hs) == 0 {
+		return
+	}
+	oldHandlers := L.handlersPtr()
+	if len(*oldHandlers) == 0 {
+		return
+	}
+	newHandlers := new([]Handler)
+	for {
+		*newHandlers = make([]Handler, 0, len(*oldHandlers))
+	oldLoop:
+		for _, oldH := range *oldHandlers {
+			for _, newH := range hs {
+				if oldH == newH {
+					continue oldLoop
+				}
+			}
+			*newHandlers = append(*newHandlers, oldH)
+		}
+		if L.casHandlers(oldHandlers, newHandlers) {
+			return
+		}
+		oldHandlers = L.handlersPtr()
+	}
 }
 
 // Level gets the logger's level.
-func (L *Logger) Level() Level {
-	return L.level
-}
+func (L *Logger) Level() Level { return L.level }
 
 // Name gets the logger's name.
-func (L *Logger) Name() string {
-	return L.name
-}
+func (L *Logger) Name() string { return L.name }
 
 // SetLevel sets the logging level of the logger.
-func (L *Logger) SetLevel(level Level) {
-	L.level = level
-}
+func (L *Logger) SetLevel(level Level) { L.level = level }
 
 // LogEvent emits the event to its handlers and then consumes the event.
 // The event must not be used after a call to LogEvent; it is pooled for
 // future use and its values will be overwritten.
 func (L *Logger) LogEvent(event *Event) {
 	if event.Level >= L.level {
-		for _, h := range L.handlers {
+		for _, h := range *L.handlersPtr() {
 			h.Emit(event)
 		}
 	}
