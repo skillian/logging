@@ -92,6 +92,7 @@ type Event struct {
 	// Level stores the event's logging level so that handlers within the
 	// logger can chose whether or not to log the event based on their
 	// configuration.
+
 	Level Level
 
 	// Msg stores the unformatted message within the event.  Only the
