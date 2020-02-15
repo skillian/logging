@@ -97,6 +97,9 @@ func (wh *WriterHandler) Emit(event *Event) {
 	wh.L.Lock()
 	defer wh.L.Unlock()
 	if event.Level >= wh.level {
-		fmt.Fprintf(wh.w, wh.formatter.Format(event))
+		_, err := fmt.Fprintf(wh.w, wh.formatter.Format(event))
+		if err != nil {
+			panic(err)
+		}
 	}
 }
