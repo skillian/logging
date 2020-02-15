@@ -1,7 +1,9 @@
 package logging
 
 import (
+	"context"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,10 +13,49 @@ import (
 // Logger objects expose methods to log events to added handlers if the event
 // exceeds the logger's log level.
 type Logger struct {
-	name           string
+	parent         *Logger
+	flags          logFlags
 	level          Level
 	handlersUnsafe *[]Handler
+	name           string
 	pools          logPool
+}
+
+type logFlags int32
+
+const (
+	// noPropagateFlag turns off propagation to parent loggers.
+	noPropagateFlag logFlags = 1 << iota
+)
+
+func (fs *logFlags) cas(old, new logFlags) bool {
+	return atomic.CompareAndSwapInt32(
+		(*int32)(fs),
+		int32(old),
+		int32(new),
+	)
+}
+
+func (fs *logFlags) load() logFlags {
+	return logFlags(atomic.LoadInt32((*int32)(fs)))
+}
+
+func (fs *logFlags) set(v logFlags) {
+	for {
+		old := fs.load()
+		if fs.cas(old, old|v) {
+			return
+		}
+	}
+}
+
+func (fs *logFlags) unset(v logFlags) {
+	for {
+		old := fs.load()
+		if fs.cas(old, old^v) {
+			return
+		}
+	}
 }
 
 type logPool struct {
@@ -23,6 +64,8 @@ type logPool struct {
 	argsPools    [4]sync.Pool
 	logEventPool sync.Pool
 }
+
+type loggerContextKey struct{}
 
 var (
 	gLoggersLock = sync.Mutex{}
@@ -35,17 +78,35 @@ var (
 func GetLogger(name string) *Logger {
 	gLoggersLock.Lock()
 	defer gLoggersLock.Unlock()
+	return getLoggerUnsafe(name)
+}
+
+// LoggerFromContext gets the logger associated with the given context.  If
+// no logger is associated, returns nil (just like how ctx.Value returns nil)
+func LoggerFromContext(ctx context.Context) *Logger {
+	L, _ := ctx.Value(loggerContextKey{}).(*Logger)
+	return L
+}
+
+// getLoggerUnsafe does not lock the gLoggersLock. Only use this if an outer
+// function has it locked.
+func getLoggerUnsafe(name string) *Logger {
 	L, ok := gLoggers[name]
-	if ok {
-		return L
+	if !ok {
+		L = createLogger(name)
+		gLoggers[name] = L
 	}
-	L = createLogger(name)
-	gLoggers[name] = L
 	return L
 }
 
 func createLogger(name string) *Logger {
+	splitAt := strings.LastIndexByte(name, '/')
+	var parent *Logger
+	if splitAt != -1 {
+		parent = getLoggerUnsafe(name[:splitAt])
+	}
 	L := &Logger{
+		parent:         parent,
 		name:           name,
 		handlersUnsafe: new([]Handler),
 	}
@@ -54,6 +115,17 @@ func createLogger(name string) *Logger {
 		L.pools.argsPools[i].New = getInterfaceSliceAllocator(i + 1)
 	}
 	return L
+}
+
+// AddToContext adds the given Logger to the context and returns that new
+// context.  If the logger is already in the context, that existing context is
+// returned as-is.
+func (L *Logger) AddToContext(ctx context.Context) (new context.Context, added bool) {
+	L2 := LoggerFromContext(ctx)
+	if L2 == L {
+		return ctx, false
+	}
+	return context.WithValue(ctx, loggerContextKey{}, L), true
 }
 
 // AddHandler adds a single logging handler to the logger.
@@ -127,19 +199,46 @@ func (L *Logger) Name() string { return L.name }
 // SetLevel sets the logging level of the logger.
 func (L *Logger) SetLevel(level Level) { L.level = level }
 
+// Propagate events to the parent logger(s).
+func (L *Logger) Propagate() bool {
+	return L.flags.load()&noPropagateFlag == 0
+}
+
+// SetPropagate toggles propagating events to parent logger(s).
+func (L *Logger) SetPropagate(v bool) {
+	if v {
+		L.flags.unset(noPropagateFlag)
+	} else {
+		L.flags.set(noPropagateFlag)
+	}
+}
+
 // LogEvent emits the event to its handlers and then consumes the event.
 // The event must not be used after a call to LogEvent; it is pooled for
 // future use and its values will be overwritten.
 func (L *Logger) LogEvent(event *Event) {
-	if event.Level >= L.level {
-		for _, h := range *L.handlersPtr() {
-			h.Emit(event)
-		}
-	}
+	L.doLogEvent(event)
 	// Pooling the event might not be a good idea if this logger didn't
 	// handle it.  For now, you should not try to log the same event
 	// to multiple loggers
 	L.poolEvent(event)
+}
+
+// doLogEvent is the actual work behind LogEvent.  It is separate from LogEvent
+// so parent loggers "know" the event is not theirs to put back into their
+// pool(s).
+func (L *Logger) doLogEvent(e *Event) {
+	/*fmt.Printf(
+	"%v(%q) logging %v\n",
+	util.Repr(L), L.Name(), util.Repr(e))*/
+	if e.Level >= L.level {
+		for _, h := range *L.handlersPtr() {
+			h.Emit(e)
+		}
+	}
+	if L.parent != nil && L.Propagate() {
+		L.parent.doLogEvent(e)
+	}
 }
 
 //
@@ -202,6 +301,40 @@ func (L *Logger) Log3(level Level, msg string, arg0, arg1, arg2 interface{}) {
 // Log4 logs an event with four arguments to the logger.
 func (L *Logger) Log4(level Level, msg string, arg0, arg1, arg2, arg3 interface{}) {
 	L.log4(level, msg, arg0, arg1, arg2, arg3)
+}
+
+//
+// Verboses:
+//
+
+// Verbose calls Log with the VerboseLevel level.
+func (L *Logger) Verbose(msg string, args ...interface{}) {
+	L.log(VerboseLevel, msg, args)
+}
+
+// Verbose0 calls Log0 with the VerboseLevel level.
+func (L *Logger) Verbose0(msg string) {
+	L.log0(VerboseLevel, msg)
+}
+
+// Verbose1 calls Log1 with the VerboseLevel level.
+func (L *Logger) Verbose1(msg string, arg0 interface{}) {
+	L.log1(VerboseLevel, msg, arg0)
+}
+
+// Verbose2 calls Log2 with the VerboseLevel level.
+func (L *Logger) Verbose2(msg string, arg0, arg1 interface{}) {
+	L.log2(VerboseLevel, msg, arg0, arg1)
+}
+
+// Verbose3 calls Log3 with the VerboseLevel level.
+func (L *Logger) Verbose3(msg string, arg0, arg1, arg2 interface{}) {
+	L.log3(VerboseLevel, msg, arg0, arg1, arg2)
+}
+
+// Verbose4 calls Log4 with the VerboseLevel level.
+func (L *Logger) Verbose4(msg string, arg0, arg1, arg2, arg3 interface{}) {
+	L.log4(VerboseLevel, msg, arg0, arg1, arg2, arg3)
 }
 
 //
