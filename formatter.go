@@ -34,7 +34,7 @@ func (f DefaultFormatter) Format(event *Event) string {
 	levelString := event.Level.String()
 	rightAlignedLevel := strings.Repeat(" ", 8-len(levelString)) + levelString
 	return fmt.Sprintf(
-		"%d-%02d-%02d %02d:%02d:%02d:  %s:  %s:  at %s in %s, line %d:  %s\n",
+		"%d-%02d-%02d %02d:%02d:%02d:  %s:  %s:  at %s in %s, line %d:\n\t%s\n",
 		year, month, day, hour, minute, second,
 		rightAlignedLevel, event.Name, event.FuncName, event.File, event.Line,
 		fmt.Sprintf(event.Msg, event.Args...))
