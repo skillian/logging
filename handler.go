@@ -73,6 +73,19 @@ type WriterHandler struct {
 	w io.Writer
 }
 
+// LockHandler is protected with a sync.Locker
+type LockHandler struct {
+	sync.Locker
+	Handler
+}
+
+// Emit an event to the underlying Handler
+func (h LockHandler) Emit(e *Event) {
+	h.Lock()
+	defer h.Unlock()
+	h.Handler.Emit(e)
+}
+
 type dummyLock struct{}
 
 func (dummyLock) Lock()   {}
