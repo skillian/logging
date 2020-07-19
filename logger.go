@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	"github.com/skillian/errors"
 )
 
 // Logger objects expose methods to log events to added handlers if the event
@@ -68,17 +70,57 @@ type logPool struct {
 type loggerContextKey struct{}
 
 var (
-	gLoggersLock = sync.Mutex{}
-	gLoggers     = make(map[string]*Logger)
+	//gLoggersLock = sync.Mutex{}
+	//gLoggers     = make(map[string]*Logger)
+	loggers = sync.Map{}
 )
+
+// LoggerOption configures a logger
+type LoggerOption func(L *Logger) error
+
+// LoggerLevel returns a LoggerOption that configures the logger level.
+func LoggerLevel(level Level) LoggerOption {
+	return func(L *Logger) error {
+		L.SetLevel(level)
+		return nil
+	}
+}
+
+// LoggerHandlers specifies handlers to associate with the logger.
+func LoggerHandlers(hs ...Handler) LoggerOption {
+	return func(L *Logger) error {
+		L.AddHandlers(hs...)
+		return nil
+	}
+}
 
 // GetLogger retrieves a logger with the given name.  If a logger with that name
 // doesn't exist, one is created.  This function is protected by a mutex and
 // can be called concurrently.
-func GetLogger(name string) *Logger {
-	gLoggersLock.Lock()
-	defer gLoggersLock.Unlock()
-	return getLoggerUnsafe(name)
+func GetLogger(name string, options ...LoggerOption) *Logger {
+	var k interface{} = name
+	var L *Logger
+	v, loaded := loggers.Load(k)
+	if loaded {
+		L = v.(*Logger)
+	} else {
+		L = createLogger(name)
+	}
+	var errs error
+	for _, opt := range options {
+		if err := opt(L); err != nil {
+			errs = errors.CreateError(err, nil, errs, 0)
+		}
+	}
+	v = L
+	v, loaded = loggers.LoadOrStore(k, v)
+	if loaded {
+		L = v.(*Logger)
+	}
+	if errs != nil {
+		L.LogErr(errs)
+	}
+	return L
 }
 
 // LoggerFromContext gets the logger associated with the given context.  If
@@ -88,22 +130,11 @@ func LoggerFromContext(ctx context.Context) *Logger {
 	return L
 }
 
-// getLoggerUnsafe does not lock the gLoggersLock. Only use this if an outer
-// function has it locked.
-func getLoggerUnsafe(name string) *Logger {
-	L, ok := gLoggers[name]
-	if !ok {
-		L = createLogger(name)
-		gLoggers[name] = L
-	}
-	return L
-}
-
 func createLogger(name string) *Logger {
 	splitAt := strings.LastIndexByte(name, '/')
 	var parent *Logger
 	if splitAt != -1 {
-		parent = getLoggerUnsafe(name[:splitAt])
+		parent = GetLogger(name[:splitAt])
 	}
 	L := &Logger{
 		parent:         parent,
@@ -146,6 +177,16 @@ func (L *Logger) AddHandlers(hs ...Handler) {
 			return
 		}
 	}
+}
+
+// Handlers returns all the handlers registered with the logger at the time
+// this call was made.  Note that by the time the function returns, the set of
+// handlers may have changed.  This is meant for debugging.
+func (L *Logger) Handlers() []Handler {
+	p := L.handlersPtr()
+	hs := make([]Handler, len(*p))
+	copy(hs, *p)
+	return hs
 }
 
 func (L *Logger) handlersPtr() *[]Handler {
@@ -228,9 +269,6 @@ func (L *Logger) LogEvent(event *Event) {
 // so parent loggers "know" the event is not theirs to put back into their
 // pool(s).
 func (L *Logger) doLogEvent(e *Event) {
-	/*fmt.Printf(
-	"%v(%q) logging %v\n",
-	util.Repr(L), L.Name(), util.Repr(e))*/
 	if e.Level >= L.level {
 		for _, h := range *L.handlersPtr() {
 			h.Emit(e)
