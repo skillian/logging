@@ -74,7 +74,11 @@ func (L Level) String() string {
 	if s, ok := levelValueToName[L]; ok {
 		return s
 	}
-	return strconv.Itoa(int(L))
+	return strings.Join([]string{
+		"logging.Level(",
+		strconv.Itoa(int(L)),
+		")",
+	}, "")
 }
 
 // Event holds an event that is being handled within logging's internals

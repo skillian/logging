@@ -2,6 +2,7 @@ package logging
 
 import (
 	"fmt"
+
 	//	"path"
 	"path/filepath"
 	"testing"
@@ -32,7 +33,7 @@ func (h *testingHandler) Emit(e *Event) {
 func TestingHandler(logger *Logger, t *testing.T) func() {
 	h := new(testingHandler)
 	// TODO: make this configurable?
-	h.SetLevel(DebugLevel)
+	h.SetLevel(VerboseLevel)
 	h.SetFormatter(testingFormatter{})
 	h.Testing = t
 	logger.AddHandler(h)

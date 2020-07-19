@@ -2,6 +2,7 @@ package logging
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -36,6 +37,7 @@ func (f DefaultFormatter) Format(event *Event) string {
 	return fmt.Sprintf(
 		"%d-%02d-%02d %02d:%02d:%02d:  %s:  %s:  at %s in %s, line %d:\n\t%s\n",
 		year, month, day, hour, minute, second,
-		rightAlignedLevel, event.Name, event.FuncName, event.File, event.Line,
+		rightAlignedLevel, event.Name, event.FuncName,
+		filepath.Base(event.File), event.Line,
 		fmt.Sprintf(event.Msg, event.Args...))
 }
