@@ -610,11 +610,12 @@ func (L *Logger) poolEvent(event *Event) {
 }
 
 func (L *Logger) poolArgsSlice(s []interface{}) {
-	if len(s) > 0 {
-		index := len(s) - 1
-		if index < len(L.pools.argsPools) {
-			L.pools.argsPools[index].Put(s)
+	length := len(s)
+	if 0 < length && length < len(L.pools.argsPools) {
+		for i := range s {
+			s[i] = nil
 		}
+		L.pools.argsPools[length-1].Put(s)
 	}
 }
 
