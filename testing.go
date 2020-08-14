@@ -30,11 +30,17 @@ func (h *testingHandler) Emit(e *Event) {
 // TestingHandler lets you register the given testing.T with the logger
 // so that debug messages are written to the testing.T.  It returns a
 // function that when called, no longer tries to log to the testing.T.
-func TestingHandler(logger *Logger, t *testing.T) func() {
+func TestingHandler(logger *Logger, t *testing.T, options ...HandlerOption) func() {
 	h := new(testingHandler)
-	// TODO: make this configurable?
-	h.SetLevel(VerboseLevel)
-	h.SetFormatter(testingFormatter{})
+	for _, opt := range options {
+		if err := opt(h); err != nil {
+			logger.Error("error initializing %v: %v", h, err)
+			return func() {}
+		}
+	}
+	if h.Formatter() == nil {
+		h.SetFormatter(testingFormatter{})
+	}
 	h.Testing = t
 	logger.AddHandler(h)
 	return func() {

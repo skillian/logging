@@ -50,6 +50,25 @@ func (hc *HandlerCommon) SetLevel(level Level) {
 	hc.level = level
 }
 
+// HandlerOption configures a handler
+type HandlerOption func(h Handler) error
+
+// HandlerFormatter sets the handler's formatter
+func HandlerFormatter(f Formatter) HandlerOption {
+	return func(h Handler) error {
+		h.SetFormatter(f)
+		return nil
+	}
+}
+
+// HandlerLevel configures a handler's logging level
+func HandlerLevel(lvl Level) HandlerOption {
+	return func(h Handler) error {
+		h.SetLevel(lvl)
+		return nil
+	}
+}
+
 // ConsoleHandler implements the Handler interface by logging events to the
 // console.
 type ConsoleHandler struct {

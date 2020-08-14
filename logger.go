@@ -86,10 +86,15 @@ func LoggerLevel(level Level) LoggerOption {
 	}
 }
 
-// LoggerHandlers specifies handlers to associate with the logger.
-func LoggerHandlers(hs ...Handler) LoggerOption {
+// LoggerHandler adds a handler to the logger.
+func LoggerHandler(h Handler, options ...HandlerOption) LoggerOption {
 	return func(L *Logger) error {
-		L.AddHandlers(hs...)
+		for _, o := range options {
+			if err := o(h); err != nil {
+				return err
+			}
+		}
+		L.AddHandlers(h)
 		return nil
 	}
 }
@@ -123,13 +128,6 @@ func GetLogger(name string, options ...LoggerOption) *Logger {
 	return L
 }
 
-// LoggerFromContext gets the logger associated with the given context.  If
-// no logger is associated, returns nil (just like how ctx.Value returns nil)
-func LoggerFromContext(ctx context.Context) *Logger {
-	L, _ := ctx.Value(loggerContextKey{}).(*Logger)
-	return L
-}
-
 func createLogger(name string) *Logger {
 	splitAt := strings.LastIndexByte(name, '/')
 	var parent *Logger
@@ -152,8 +150,8 @@ func createLogger(name string) *Logger {
 // context.  If the logger is already in the context, that existing context is
 // returned as-is.
 func (L *Logger) AddToContext(ctx context.Context) (new context.Context, added bool) {
-	L2 := LoggerFromContext(ctx)
-	if L2 == L {
+	L2, ok := LoggerFromContext(ctx)
+	if ok && L2 == L {
 		return ctx, false
 	}
 	return context.WithValue(ctx, loggerContextKey{}, L), true
