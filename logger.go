@@ -125,9 +125,9 @@ func GetLogger(name string, options ...LoggerOption) *Logger {
 
 // LoggerFromContext gets the logger associated with the given context.  If
 // no logger is associated, returns nil (just like how ctx.Value returns nil)
-func LoggerFromContext(ctx context.Context) *Logger {
-	L, _ := ctx.Value(loggerContextKey{}).(*Logger)
-	return L
+func LoggerFromContext(ctx context.Context) (*Logger, bool) {
+	L, ok := ctx.Value(loggerContextKey{}).(*Logger)
+	return L, ok
 }
 
 func createLogger(name string) *Logger {
@@ -152,8 +152,8 @@ func createLogger(name string) *Logger {
 // context.  If the logger is already in the context, that existing context is
 // returned as-is.
 func (L *Logger) AddToContext(ctx context.Context) (new context.Context, added bool) {
-	L2 := LoggerFromContext(ctx)
-	if L2 == L {
+	L2, ok := LoggerFromContext(ctx)
+	if ok && L2 == L {
 		return ctx, false
 	}
 	return context.WithValue(ctx, loggerContextKey{}, L), true
