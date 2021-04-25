@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // Formatter objects are used by their Handlers to format events into a single
@@ -34,10 +35,19 @@ func (f DefaultFormatter) Format(event *Event) string {
 	hour, minute, second := event.Time.Clock()
 	levelString := event.Level.String()
 	rightAlignedLevel := strings.Repeat(" ", 8-len(levelString)) + levelString
+	msg := event.Msg
+	if len(event.Args) > 0 {
+		msg = fmt.Sprintf(event.Msg, event.Args...)
+	}
+	lines := strings.Split(msg, "\n")
+	for i, line := range lines {
+		lines[i] = "\t" + line
+	}
+	msg = strings.Join(lines, "\n")
 	return fmt.Sprintf(
-		"%d-%02d-%02d %02d:%02d:%02d:  %s:  %s:  at %s in %s, line %d:\n\t%s\n",
+		"%d-%02d-%02d %02d:%02d:%02d:  %s:  %s:  at %s in %s, line %d:\n%s\n\n",
 		year, month, day, hour, minute, second,
 		rightAlignedLevel, event.Name, event.FuncName,
 		filepath.Base(event.File), event.Line,
-		fmt.Sprintf(event.Msg, event.Args...))
+		strings.TrimRightFunc(msg, unicode.IsSpace))
 }

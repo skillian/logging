@@ -50,6 +50,21 @@ func (hc *HandlerCommon) SetLevel(level Level) {
 	hc.level = level
 }
 
+// EmitFuncHandler is a Handler that delegates emitting events to a
+// EmitFunc
+type EmitFuncHandler struct {
+	EmitFunc func(e *Event)
+	HandlerCommon
+}
+
+// HandlerFromEmitFunc creates a handler from an Emit function
+func HandlerFromEmitFunc(f func(e *Event)) Handler {
+	return &EmitFuncHandler{EmitFunc: f}
+}
+
+// Emit delegates to EmitFuncHandler.EmitFunc
+func (h EmitFuncHandler) Emit(e *Event) { h.EmitFunc(e) }
+
 // HandlerOption configures a handler
 type HandlerOption func(h Handler) error
 
@@ -78,7 +93,7 @@ type ConsoleHandler struct {
 // Emit implements the Handler interface.
 func (ch ConsoleHandler) Emit(event *Event) {
 	if event.Level >= ch.level {
-		fmt.Fprintf(os.Stderr, ch.formatter.Format(event))
+		fmt.Fprint(os.Stderr, ch.formatter.Format(event))
 	}
 }
 

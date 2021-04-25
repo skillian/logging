@@ -14,6 +14,7 @@ type testingHandler struct {
 }
 
 func (h *testingHandler) Emit(e *Event) {
+	h.Testing.Helper()
 	msg := h.Formatter().Format(e)
 	var fn func(args ...interface{})
 	switch {
