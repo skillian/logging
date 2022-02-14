@@ -98,7 +98,8 @@ func (ch ConsoleHandler) Emit(event *Event) {
 }
 
 // WriterHandler implements the Handler interface by writing events into an
-// underlying io.Writer implementation.  Access to the writer is
+// underlying io.Writer implementation.  Access to the writer is synchronized
+// with a sync.Locker.
 type WriterHandler struct {
 	HandlerCommon
 
@@ -144,7 +145,7 @@ func (wh *WriterHandler) Emit(event *Event) {
 	wh.L.Lock()
 	defer wh.L.Unlock()
 	if event.Level >= wh.level {
-		_, err := fmt.Fprintf(wh.w, wh.formatter.Format(event))
+		_, err := fmt.Fprint(wh.w, wh.formatter.Format(event))
 		if err != nil {
 			panic(err)
 		}

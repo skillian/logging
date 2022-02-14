@@ -2,7 +2,10 @@ package logging
 
 import (
 	"context"
+	"math/bits"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +31,7 @@ type logFlags int32
 const (
 	// noPropagateFlag turns off propagation to parent loggers.
 	noPropagateFlag logFlags = 1 << iota
+	temporaryFlag
 )
 
 func (fs *logFlags) cas(old, new logFlags) bool {
@@ -61,13 +65,74 @@ func (fs *logFlags) unset(v logFlags) {
 }
 
 type logPool struct {
-	// argsPools holds Pools of Event Args slices of specific sizes to
-	// reduce allocations.
-	argsPools    [4]sync.Pool
-	logEventPool sync.Pool
+	mu         sync.Mutex
+	freeArgs   [][]interface{}
+	freeEvents []*Event
 }
 
-type loggerContextKey struct{}
+func (p *logPool) getArgs() (args []interface{}) {
+	if len(p.freeArgs) == 0 {
+		// this code assumes cache lines are 64 bytes.
+		p.freeArgs = append(p.freeArgs[:cap(p.freeArgs)], nil)
+		p.freeArgs = p.freeArgs[:cap(p.freeArgs)]
+		// ifacePerCacheLine is 8 on 32-bit systems and 4 on
+		// 64-bit systems.  We use this later when we
+		// allocate a slice of args to align the args to a cache
+		// line so that events can be created in parallel and
+		// avoid "false sharing."
+		const ifacePerCacheLine = 8 >> (bits.UintSize >> 6)
+		// add one so we can manually align to a cache line
+		cache := make([]interface{}, len(p.freeArgs)*(ifacePerCacheLine+1))
+		ptr := uintptr(unsafe.Pointer(&cache[0]))
+		inc := (64 - (ptr % 64)) % 64
+		if inc > 0 {
+			sh := (*reflect.SliceHeader)(unsafe.Pointer(&cache))
+			sh.Data = ptr + inc
+			sh.Len--
+			sh.Cap--
+		}
+		for i := range p.freeArgs {
+			start := i * ifacePerCacheLine
+			end := start + ifacePerCacheLine
+			p.freeArgs[i] = cache[start:start:end]
+		}
+	}
+	args = p.freeArgs[len(p.freeArgs)-1]
+	p.freeArgs = p.freeArgs[:len(p.freeArgs)-1]
+	return
+}
+
+func (p *logPool) getEvent() (ev *Event) {
+	p.mu.Lock()
+	{
+		if len(p.freeEvents) == 0 {
+			p.freeEvents = append(p.freeEvents[:cap(p.freeEvents)], nil)
+			p.freeEvents = p.freeEvents[:cap(p.freeEvents)]
+			cache := make([]Event, len(p.freeEvents))
+			for i := range p.freeEvents {
+				p.freeEvents[i] = &cache[i]
+			}
+		}
+		ev = p.freeEvents[len(p.freeEvents)-1]
+		p.freeEvents = p.freeEvents[:len(p.freeEvents)-1]
+	}
+	p.mu.Unlock()
+	return
+}
+
+func (p *logPool) putEvent(ev *Event) {
+	p.mu.Lock()
+	{
+		for i := range ev.Args {
+			ev.Args[i] = nil
+		}
+		ev.Args = ev.Args[:0]
+		p.freeArgs = append(p.freeArgs, ev.Args)
+		ev.Args = nil
+		p.freeEvents = append(p.freeEvents, ev)
+	}
+	p.mu.Unlock()
+}
 
 var (
 	//gLoggersLock = sync.Mutex{}
@@ -99,6 +164,35 @@ func LoggerHandler(h Handler, options ...HandlerOption) LoggerOption {
 	}
 }
 
+// LoggerTemporary configures a logger to be temporary and not
+// cached.
+var LoggerTemporary = LoggerOption(func(L *Logger) error {
+	if strings.HasSuffix(L.name, ">") {
+		return nil
+	}
+	L.name = strings.Join([]string{
+		L.name,
+		"<0x",
+		strconv.FormatUint(uint64(uintptr(unsafe.Pointer(L))), 16),
+		">",
+	}, "")
+	return nil
+})
+
+// loggerTemporaryData represents LoggerTemporary as a uintptr so that
+// GetLogger can check to see if any of its options are LoggerTemporary
+//
+var loggerTemporaryData = uintptr(*((*unsafe.Pointer)(unsafe.Pointer(&LoggerTemporary))))
+
+// LoggerPropagate returns a logger option that configures the logger's
+// propagation flag to the given value.
+func LoggerPropagate(propagate bool) LoggerOption {
+	return func(L *Logger) error {
+		L.SetPropagate(propagate)
+		return nil
+	}
+}
+
 // GetLogger retrieves a logger with the given name.  If a logger with that name
 // doesn't exist, one is created.  This function is protected by a mutex and
 // can be called concurrently.
@@ -112,15 +206,22 @@ func GetLogger(name string, options ...LoggerOption) *Logger {
 		L = createLogger(name)
 	}
 	var errs error
+	temp := false
 	for _, opt := range options {
 		if err := opt(L); err != nil {
 			errs = errors.CreateError(err, nil, errs, 0)
 		}
+		if !temp {
+			optData := uintptr(*((*unsafe.Pointer)(unsafe.Pointer(&opt))))
+			temp = optData == loggerTemporaryData
+		}
 	}
-	v = L
-	v, loaded = loggers.LoadOrStore(k, v)
-	if loaded {
-		L = v.(*Logger)
+	if !temp {
+		v = L
+		v, loaded = loggers.LoadOrStore(k, v)
+		if loaded {
+			L = v.(*Logger)
+		}
 	}
 	if errs != nil {
 		L.LogErr(errs)
@@ -131,7 +232,7 @@ func GetLogger(name string, options ...LoggerOption) *Logger {
 // LoggerFromContext gets the logger associated with the given context.  If
 // no logger is associated, returns nil (just like how ctx.Value returns nil)
 func LoggerFromContext(ctx context.Context) (*Logger, bool) {
-	L, ok := ctx.Value(loggerContextKey{}).(*Logger)
+	L, ok := ctx.Value((*Logger)(nil)).(*Logger)
 	return L, ok
 }
 
@@ -146,22 +247,18 @@ func createLogger(name string) *Logger {
 		name:           name,
 		handlersUnsafe: new([]Handler),
 	}
-	L.pools.logEventPool.New = logEventAllocator
-	for i := 0; i < len(L.pools.argsPools); i++ {
-		L.pools.argsPools[i].New = getInterfaceSliceAllocator(i + 1)
-	}
 	return L
 }
 
 // AddToContext adds the given Logger to the context and returns that new
 // context.  If the logger is already in the context, that existing context is
 // returned as-is.
-func (L *Logger) AddToContext(ctx context.Context) (new context.Context, added bool) {
+func (L *Logger) AddToContext(ctx context.Context) context.Context {
 	L2, ok := LoggerFromContext(ctx)
 	if ok && L2 == L {
-		return ctx, false
+		return ctx
 	}
-	return context.WithValue(ctx, loggerContextKey{}, L), true
+	return context.WithValue(ctx, (*Logger)(nil), L)
 }
 
 // AddHandler adds a single logging handler to the logger.
@@ -236,6 +333,32 @@ func (L *Logger) RemoveHandlers(hs ...Handler) {
 	}
 }
 
+// EffectiveLevel gets the minimum level of this logger and any of the parents
+// it can propagate events to.  Use this if in order to log something, you need
+// to do extra work to build some representation of it and you don't want to
+// do that unless it's actually going to be logged:
+//
+//	if logger.EffectiveLevel() <= logging.VerboseLevel {
+//		nvps := make([]NameValuePair, len(names))
+//		for i, n := range names {
+//			nvps[i] = NameValuePair{Name: n, Value: values[i]}
+//		}
+//		logger.Verbose1("doing work with names and values: %#v", nvps)
+//	}
+func (L *Logger) EffectiveLevel() Level {
+	minLevel := L.level
+	for L.Propagate() {
+		L = L.parent
+		if L == nil {
+			break
+		}
+		if L.level < minLevel {
+			minLevel = L.level
+		}
+	}
+	return minLevel
+}
+
 // Level gets the logger's level.
 func (L *Logger) Level() Level { return L.level }
 
@@ -267,7 +390,7 @@ func (L *Logger) LogEvent(event *Event) {
 	// Pooling the event might not be a good idea if this logger didn't
 	// handle it.  For now, you should not try to log the same event
 	// to multiple loggers
-	L.poolEvent(event)
+	L.pools.putEvent(event)
 }
 
 // doLogEvent is the actual work behind LogEvent.  It is separate from LogEvent
@@ -543,7 +666,7 @@ func (L *Logger) createEventFromCaller(level Level, msg string, args []interface
 // CreateEvent doesn't always actually create an event but will reuse an event
 // that's been added to the event pool (to reduce allocations).
 func (L *Logger) CreateEvent(time time.Time, level Level, msg string, args []interface{}, funcname, file string, line int) *Event {
-	event := L.getOrCreateEvent()
+	event := L.pools.getEvent()
 	event.Name = L.name
 	event.Time = time
 	event.Level = level
@@ -565,75 +688,21 @@ func (L *Logger) createEvent0FromCaller(level Level, msg string, caller int) *Ev
 }
 
 func (L *Logger) createEvent1FromCaller(level Level, msg string, arg0 interface{}, caller int) *Event {
-	s := L.getArgsSlice(1)
-	s[0] = arg0
+	s := append(L.pools.getArgs(), arg0)
 	return L.createEventFromCaller(level, msg, s, caller+1)
 }
 
 func (L *Logger) createEvent2FromCaller(level Level, msg string, arg0, arg1 interface{}, caller int) *Event {
-	s := L.getArgsSlice(2)
-	s[0] = arg0
-	s[1] = arg1
+	s := append(L.pools.getArgs(), arg0, arg1)
 	return L.createEventFromCaller(level, msg, s, caller+1)
 }
 
 func (L *Logger) createEvent3FromCaller(level Level, msg string, arg0, arg1, arg2 interface{}, caller int) *Event {
-	s := L.getArgsSlice(3)
-	s[0] = arg0
-	s[1] = arg1
-	s[2] = arg2
+	s := append(L.pools.getArgs(), arg0, arg1, arg2)
 	return L.createEventFromCaller(level, msg, s, caller+1)
 }
 
 func (L *Logger) createEvent4FromCaller(level Level, msg string, arg0, arg1, arg2, arg3 interface{}, caller int) *Event {
-	s := L.getArgsSlice(4)
-	s[0] = arg0
-	s[1] = arg1
-	s[2] = arg2
-	s[3] = arg3
+	s := append(L.pools.getArgs(), arg0, arg1, arg2, arg3)
 	return L.createEventFromCaller(level, msg, s, caller+1)
-}
-
-func (L *Logger) getOrCreateEvent() *Event {
-	// TODO: look into not using sync.Pool.New
-	return L.pools.logEventPool.Get().(*Event)
-}
-
-func (L *Logger) getArgsSlice(length int) []interface{} {
-	index := length - 1
-	if index < len(L.pools.argsPools) {
-		return L.pools.argsPools[index].Get().([]interface{})
-	}
-	return make([]interface{}, length)
-}
-
-func (L *Logger) poolEvent(event *Event) {
-	args := event.Args
-	event.Args = nil
-	L.pools.logEventPool.Put(event)
-	L.poolArgsSlice(args)
-}
-
-func (L *Logger) poolArgsSlice(s []interface{}) {
-	length := len(s)
-	if 0 < length && length < len(L.pools.argsPools) {
-		for i := range s {
-			s[i] = nil
-		}
-		L.pools.argsPools[length-1].Put(s)
-	}
-}
-
-//
-// Allocators
-//
-
-func logEventAllocator() interface{} {
-	return new(Event)
-}
-
-func getInterfaceSliceAllocator(size int) func() interface{} {
-	return func() interface{} {
-		return make([]interface{}, size)
-	}
 }

@@ -29,7 +29,8 @@ type DefaultFormatter struct{}
 
 // Format returns the event with the following layout:
 //
-//    yyyy-mm-dd HH:MM:SS:  Level:  LoggerName:  at FuncName in File, line Line:  fmt.Sprintf(Msg, Args...)
+//    yyyy-mm-dd HH:MM:SS:  Level:  LoggerName:  at FuncName in File, line Line:
+//    	fmt.Sprintf(Msg, Args...)
 func (f DefaultFormatter) Format(event *Event) string {
 	year, month, day := event.Time.Date()
 	hour, minute, second := event.Time.Clock()
@@ -50,4 +51,30 @@ func (f DefaultFormatter) Format(event *Event) string {
 		rightAlignedLevel, event.Name, event.FuncName,
 		filepath.Base(event.File), event.Line,
 		strings.TrimRightFunc(msg, unicode.IsSpace))
+}
+
+type GoFormatter struct{}
+
+func (f GoFormatter) Format(event *Event) string {
+	year, month, day := event.Time.Date()
+	hour, minute, second := event.Time.Clock()
+	levelString := event.Level.String()
+	rightAlignedLevel := strings.Repeat(" ", 8-len(levelString)) + levelString
+	msg := event.Msg
+	if len(event.Args) > 0 {
+		msg = fmt.Sprintf(event.Msg, event.Args...)
+	}
+	lines := strings.Split(msg, "\n")
+	for i, line := range lines {
+		lines[i] = "\t" + line
+	}
+	msg = strings.Join(lines, "\n")
+	return fmt.Sprintf(
+		"%d-%02d-%02d %02d:%02d:%02d:  %s:  %s:  %s:  %s\n\t%s:%d\n",
+		year, month, day, hour, minute, second,
+		rightAlignedLevel, event.Name,
+		strings.TrimRightFunc(msg, unicode.IsSpace),
+		event.FuncName,
+		event.File, event.Line,
+	)
 }
