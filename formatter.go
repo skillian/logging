@@ -59,7 +59,7 @@ func (f GoFormatter) Format(event *Event) string {
 	year, month, day := event.Time.Date()
 	hour, minute, second := event.Time.Clock()
 	levelString := event.Level.String()
-	rightAlignedLevel := strings.Repeat(" ", 8-len(levelString)) + levelString
+	rightAlignedLevel := strings.Repeat(" ", 20-len(levelString)) + levelString
 	msg := event.Msg
 	if len(event.Args) > 0 {
 		msg = fmt.Sprintf(event.Msg, event.Args...)
