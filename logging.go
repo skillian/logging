@@ -1,13 +1,17 @@
 package logging
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"time"
 )
 
 // Level ranks the severity of a logging message
-type Level int
+type Level int8
+
+// EverythingLevel will capture every log level
+const EverythingLevel Level = Level(math.MinInt8)
 
 const (
 	// VerboseLevel includes the most logging information.  As the
