@@ -70,7 +70,7 @@ func (f GoFormatter) Format(event *Event) string {
 	}
 	msg = strings.Join(lines, "\n")
 	return fmt.Sprintf(
-		"%d-%02d-%02d %02d:%02d:%02d:  %s:  %s:  %s:  %s\n\t%s:%d\n",
+		"%d-%02d-%02d %02d:%02d:%02d:  %s:  %s:  %s:\n\t%s\n\t\t%s:%d\n",
 		year, month, day, hour, minute, second,
 		rightAlignedLevel, event.Name,
 		strings.TrimRightFunc(msg, unicode.IsSpace),
