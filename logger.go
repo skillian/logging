@@ -272,7 +272,12 @@ func (L *Logger) AddHandlers(hs ...Handler) {
 	newHandlers := new([]Handler)
 	for {
 		oldHandlers := L.handlersPtr()
-		*newHandlers = make([]Handler, len(*oldHandlers)+len(hs))
+		newLength := len(*oldHandlers) + len(hs)
+		if len(*newHandlers) < newLength {
+			*newHandlers = make([]Handler, newLength)
+		} else {
+			*newHandlers = (*newHandlers)[:newLength]
+		}
 		copy(*newHandlers, *oldHandlers)
 		copy((*newHandlers)[len(*oldHandlers):], hs)
 		if L.casHandlers(oldHandlers, newHandlers) {
