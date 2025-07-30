@@ -43,9 +43,12 @@ func TestingHandler(logger *Logger, t *testing.T, options ...HandlerOption) func
 		h.SetFormatter(testingFormatter{})
 	}
 	h.Testing = t
+	oldPreCallFunc := logger.preCallFunc
+	logger.preCallFunc = t.Helper
 	logger.AddHandler(h)
 	return func() {
 		logger.RemoveHandlers(h)
+		logger.preCallFunc = oldPreCallFunc
 	}
 }
 

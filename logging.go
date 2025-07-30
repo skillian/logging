@@ -5,13 +5,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 )
 
 // Level ranks the severity of a logging message
 type Level int8
 
-// EverythingLevel will capture every log level
-const EverythingLevel Level = Level(math.MinInt8)
+const (
+	// EverythingLevel will capture every log level
+	EverythingLevel Level = Level(math.MinInt8)
+
+	levelMask = (1 << (8 * unsafe.Sizeof(Level(0)))) - 1
+)
 
 const (
 	// VerboseLevel includes the most logging information.  As the

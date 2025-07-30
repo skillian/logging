@@ -3,7 +3,6 @@ package logging
 import (
 	"context"
 	"math/bits"
-	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -12,16 +11,19 @@ import (
 	"time"
 	"unsafe"
 
+	"golang.org/x/sys/cpu"
+
 	"github.com/skillian/errors"
+	"github.com/skillian/unsafereflect"
 )
 
 // Logger objects expose methods to log events to added handlers if the event
 // exceeds the logger's log level.
 type Logger struct {
 	parent         *Logger
-	flags          logFlags
-	level          Level
 	handlersUnsafe *[]Handler
+	preCallFunc    func()
+	flags          logFlags
 	name           string
 	pools          logPool
 }
@@ -30,7 +32,7 @@ type logFlags int32
 
 const (
 	// noPropagateFlag turns off propagation to parent loggers.
-	noPropagateFlag logFlags = 1 << iota
+	noPropagateFlag logFlags = 1 << (iota + (8 * unsafe.Sizeof(Level(0))))
 	temporaryFlag
 )
 
@@ -58,7 +60,7 @@ func (fs *logFlags) set(v logFlags) {
 func (fs *logFlags) unset(v logFlags) {
 	for {
 		old := fs.load()
-		if fs.cas(old, old^v) {
+		if fs.cas(old, old&(^v)) {
 			return
 		}
 	}
@@ -70,9 +72,11 @@ type logPool struct {
 	freeEvents []*Event
 }
 
+const cacheLinePadSize = unsafe.Sizeof(cpu.CacheLinePad{})
+
 func (p *logPool) getArgs() (args []interface{}) {
+	p.mu.Lock()
 	if len(p.freeArgs) == 0 {
-		// this code assumes cache lines are 64 bytes.
 		p.freeArgs = append(p.freeArgs[:cap(p.freeArgs)], nil)
 		p.freeArgs = p.freeArgs[:cap(p.freeArgs)]
 		// ifacePerCacheLine is 8 on 32-bit systems and 4 on
@@ -80,17 +84,20 @@ func (p *logPool) getArgs() (args []interface{}) {
 		// allocate a slice of args to align the args to a cache
 		// line so that events can be created in parallel and
 		// avoid "false sharing."
-		const ifacePerCacheLine = 8 >> (bits.UintSize >> 6)
+		const ifacePerCacheLine = int(cacheLinePadSize / (bits.UintSize >> 2))
 		// add one so we can manually align to a cache line
-		cache := make([]interface{}, len(p.freeArgs)*(ifacePerCacheLine+1))
-		ptr := uintptr(unsafe.Pointer(&cache[0]))
-		inc := (64 - (ptr % 64)) % 64
-		if inc > 0 {
-			sh := (*reflect.SliceHeader)(unsafe.Pointer(&cache))
-			sh.Data = ptr + inc
-			sh.Len--
-			sh.Cap--
+		cache := make([]interface{}, len(p.freeArgs)+(ifacePerCacheLine-1))
+		pinner := runtime.Pinner{}
+		pinner.Pin(&cache[0])
+		{
+			sd := unsafereflect.SliceDataOf(unsafe.Pointer(&cache))
+			data := uintptr(sd.Data)
+			inc := uintptr(cacheLinePadSize-(data%cacheLinePadSize)) % cacheLinePadSize
+			sd.Data = unsafe.Add(sd.Data, inc)
+			sd.Len = len(p.freeArgs)
+			sd.Len = len(p.freeArgs)
 		}
+		pinner.Unpin()
 		for i := range p.freeArgs {
 			start := i * ifacePerCacheLine
 			end := start + ifacePerCacheLine
@@ -99,6 +106,7 @@ func (p *logPool) getArgs() (args []interface{}) {
 	}
 	args = p.freeArgs[len(p.freeArgs)-1]
 	p.freeArgs = p.freeArgs[:len(p.freeArgs)-1]
+	p.mu.Unlock()
 	return
 }
 
@@ -138,18 +146,12 @@ var (
 	//gLoggersLock = sync.Mutex{}
 	//gLoggers     = make(map[string]*Logger)
 	loggers = sync.Map{}
+
+	defaultPreCallFunc = func() {}
 )
 
 // LoggerOption configures a logger
 type LoggerOption func(L *Logger) error
-
-// LoggerLevel returns a LoggerOption that configures the logger level.
-func LoggerLevel(level Level) LoggerOption {
-	return func(L *Logger) error {
-		L.SetLevel(level)
-		return nil
-	}
-}
 
 // LoggerHandler adds a handler to the logger.
 func LoggerHandler(h Handler, options ...HandlerOption) LoggerOption {
@@ -164,25 +166,36 @@ func LoggerHandler(h Handler, options ...HandlerOption) LoggerOption {
 	}
 }
 
-// LoggerTemporary configures a logger to be temporary and not
-// cached.
-var LoggerTemporary = LoggerOption(func(L *Logger) error {
-	if strings.HasSuffix(L.name, ">") {
+// LoggerLevel returns a LoggerOption that configures the logger level.
+func LoggerLevel(level Level) LoggerOption {
+	return func(L *Logger) error {
+		L.SetLevel(level)
 		return nil
 	}
-	L.name = strings.Join([]string{
-		L.name,
-		"<0x",
-		strconv.FormatUint(uint64(uintptr(unsafe.Pointer(L))), 16),
-		">",
-	}, "")
-	return nil
-})
+}
+
+// LoggerTemporary configures a logger to be temporary and not cached.
+func LoggerTemporary() LoggerOption {
+	return func(L *Logger) error {
+		if L.name != "" {
+			return nil
+		}
+		L.name = strings.Join([]string{
+			L.name,
+			"<0x",
+			strconv.FormatUint(uint64(uintptr(unsafe.Pointer(L))), 16),
+			">",
+		}, "")
+		return nil
+	}
+}
 
 // loggerTemporaryData represents LoggerTemporary as a uintptr so that
 // GetLogger can check to see if any of its options are LoggerTemporary
-//
-var loggerTemporaryData = uintptr(*((*unsafe.Pointer)(unsafe.Pointer(&LoggerTemporary))))
+var loggerTemporaryData = func() unsafe.Pointer {
+	f := LoggerTemporary()
+	return *((*unsafe.Pointer)(unsafe.Pointer(&f)))
+}()
 
 // LoggerPropagate returns a logger option that configures the logger's
 // propagation flag to the given value.
@@ -212,7 +225,7 @@ func GetLogger(name string, options ...LoggerOption) *Logger {
 			errs = errors.CreateError(err, nil, errs, 0)
 		}
 		if !temp {
-			optData := uintptr(*((*unsafe.Pointer)(unsafe.Pointer(&opt))))
+			optData := *((*unsafe.Pointer)(unsafe.Pointer(&opt)))
 			temp = optData == loggerTemporaryData
 		}
 	}
@@ -244,6 +257,7 @@ func createLogger(name string) *Logger {
 	}
 	L := &Logger{
 		parent:         parent,
+		preCallFunc:    defaultPreCallFunc,
 		name:           name,
 		handlersUnsafe: new([]Handler),
 	}
@@ -351,27 +365,36 @@ func (L *Logger) RemoveHandlers(hs ...Handler) {
 //		logger.Verbose1("doing work with names and values: %#v", nvps)
 //	}
 func (L *Logger) EffectiveLevel() Level {
-	minLevel := L.level
+	minLevel := L.Level()
 	for L.Propagate() {
 		L = L.parent
 		if L == nil {
 			break
 		}
-		if L.level < minLevel {
-			minLevel = L.level
+		parentLevel := L.Level()
+		if parentLevel < minLevel {
+			minLevel = parentLevel
 		}
 	}
 	return minLevel
 }
 
 // Level gets the logger's level.
-func (L *Logger) Level() Level { return L.level }
+func (L *Logger) Level() Level { return Level(L.flags & levelMask) }
 
 // Name gets the logger's name.
 func (L *Logger) Name() string { return L.name }
 
 // SetLevel sets the logging level of the logger.
-func (L *Logger) SetLevel(level Level) { L.level = level }
+func (L *Logger) SetLevel(level Level) {
+	for {
+		oldFlags := L.flags.load()
+		newFlags := (oldFlags & ^levelMask) | logFlags(level)
+		if L.flags.cas(oldFlags, newFlags) {
+			return
+		}
+	}
+}
 
 // Propagate events to the parent logger(s).
 func (L *Logger) Propagate() bool {
@@ -391,10 +414,8 @@ func (L *Logger) SetPropagate(v bool) {
 // The event must not be used after a call to LogEvent; it is pooled for
 // future use and its values will be overwritten.
 func (L *Logger) LogEvent(event *Event) {
+	L.preCallFunc()
 	L.doLogEvent(event)
-	// Pooling the event might not be a good idea if this logger didn't
-	// handle it.  For now, you should not try to log the same event
-	// to multiple loggers
 	L.pools.putEvent(event)
 }
 
@@ -402,7 +423,8 @@ func (L *Logger) LogEvent(event *Event) {
 // so parent loggers "know" the event is not theirs to put back into their
 // pool(s).
 func (L *Logger) doLogEvent(e *Event) {
-	if e.Level >= L.level {
+	L.preCallFunc()
+	if e.Level >= L.Level() {
 		for _, h := range *L.handlersPtr() {
 			h.Emit(e)
 		}
@@ -417,26 +439,32 @@ func (L *Logger) doLogEvent(e *Event) {
 //
 
 func (L *Logger) log(level Level, msg string, args []interface{}) {
+	L.preCallFunc()
 	L.LogEvent(L.createEventFromCaller(level, msg, args, 2))
 }
 
 func (L *Logger) log0(level Level, msg string) {
+	L.preCallFunc()
 	L.LogEvent(L.createEvent0FromCaller(level, msg, 2))
 }
 
 func (L *Logger) log1(level Level, msg string, arg0 interface{}) {
+	L.preCallFunc()
 	L.LogEvent(L.createEvent1FromCaller(level, msg, arg0, 2))
 }
 
 func (L *Logger) log2(level Level, msg string, arg0, arg1 interface{}) {
+	L.preCallFunc()
 	L.LogEvent(L.createEvent2FromCaller(level, msg, arg0, arg1, 2))
 }
 
 func (L *Logger) log3(level Level, msg string, arg0, arg1, arg2 interface{}) {
+	L.preCallFunc()
 	L.LogEvent(L.createEvent3FromCaller(level, msg, arg0, arg1, arg2, 2))
 }
 
 func (L *Logger) log4(level Level, msg string, arg0, arg1, arg2, arg3 interface{}) {
+	L.preCallFunc()
 	L.LogEvent(L.createEvent4FromCaller(level, msg, arg0, arg1, arg2, arg3, 2))
 }
 
@@ -446,31 +474,37 @@ func (L *Logger) log4(level Level, msg string, arg0, arg1, arg2, arg3 interface{
 
 // Log an event to the logger.
 func (L *Logger) Log(level Level, msg string, args ...interface{}) {
+	L.preCallFunc()
 	L.log(level, msg, args)
 }
 
 // Log0 logs an event with no arguments to the logger.
 func (L *Logger) Log0(level Level, msg string) {
+	L.preCallFunc()
 	L.log0(level, msg)
 }
 
 // Log1 logs an event with a single argument to the logger.
 func (L *Logger) Log1(level Level, msg string, arg0 interface{}) {
+	L.preCallFunc()
 	L.log1(level, msg, arg0)
 }
 
 // Log2 logs an event with two arguments to the logger.
 func (L *Logger) Log2(level Level, msg string, arg0, arg1 interface{}) {
+	L.preCallFunc()
 	L.log2(level, msg, arg0, arg1)
 }
 
 // Log3 logs an event with three arguments to the logger.
 func (L *Logger) Log3(level Level, msg string, arg0, arg1, arg2 interface{}) {
+	L.preCallFunc()
 	L.log3(level, msg, arg0, arg1, arg2)
 }
 
 // Log4 logs an event with four arguments to the logger.
 func (L *Logger) Log4(level Level, msg string, arg0, arg1, arg2, arg3 interface{}) {
+	L.preCallFunc()
 	L.log4(level, msg, arg0, arg1, arg2, arg3)
 }
 
@@ -480,31 +514,37 @@ func (L *Logger) Log4(level Level, msg string, arg0, arg1, arg2, arg3 interface{
 
 // Verbose calls Log with the VerboseLevel level.
 func (L *Logger) Verbose(msg string, args ...interface{}) {
+	L.preCallFunc()
 	L.log(VerboseLevel, msg, args)
 }
 
 // Verbose0 calls Log0 with the VerboseLevel level.
 func (L *Logger) Verbose0(msg string) {
+	L.preCallFunc()
 	L.log0(VerboseLevel, msg)
 }
 
 // Verbose1 calls Log1 with the VerboseLevel level.
 func (L *Logger) Verbose1(msg string, arg0 interface{}) {
+	L.preCallFunc()
 	L.log1(VerboseLevel, msg, arg0)
 }
 
 // Verbose2 calls Log2 with the VerboseLevel level.
 func (L *Logger) Verbose2(msg string, arg0, arg1 interface{}) {
+	L.preCallFunc()
 	L.log2(VerboseLevel, msg, arg0, arg1)
 }
 
 // Verbose3 calls Log3 with the VerboseLevel level.
 func (L *Logger) Verbose3(msg string, arg0, arg1, arg2 interface{}) {
+	L.preCallFunc()
 	L.log3(VerboseLevel, msg, arg0, arg1, arg2)
 }
 
 // Verbose4 calls Log4 with the VerboseLevel level.
 func (L *Logger) Verbose4(msg string, arg0, arg1, arg2, arg3 interface{}) {
+	L.preCallFunc()
 	L.log4(VerboseLevel, msg, arg0, arg1, arg2, arg3)
 }
 
@@ -514,16 +554,19 @@ func (L *Logger) Verbose4(msg string, arg0, arg1, arg2, arg3 interface{}) {
 
 // Debug calls Log with the DebugLevel level.
 func (L *Logger) Debug(msg string, args ...interface{}) {
+	L.preCallFunc()
 	L.log(DebugLevel, msg, args)
 }
 
 // Debug0 calls Log0 with the DebugLevel level.
 func (L *Logger) Debug0(msg string) {
+	L.preCallFunc()
 	L.log0(DebugLevel, msg)
 }
 
 // Debug1 calls Log1 with the DebugLevel level.
 func (L *Logger) Debug1(msg string, arg0 interface{}) {
+	L.preCallFunc()
 	L.log1(DebugLevel, msg, arg0)
 }
 
@@ -534,11 +577,13 @@ func (L *Logger) Debug2(msg string, arg0, arg1 interface{}) {
 
 // Debug3 calls Log3 with the DebugLevel level.
 func (L *Logger) Debug3(msg string, arg0, arg1, arg2 interface{}) {
+	L.preCallFunc()
 	L.log3(DebugLevel, msg, arg0, arg1, arg2)
 }
 
 // Debug4 calls Log4 with the DebugLevel level.
 func (L *Logger) Debug4(msg string, arg0, arg1, arg2, arg3 interface{}) {
+	L.preCallFunc()
 	L.log4(DebugLevel, msg, arg0, arg1, arg2, arg3)
 }
 
@@ -548,31 +593,37 @@ func (L *Logger) Debug4(msg string, arg0, arg1, arg2, arg3 interface{}) {
 
 // Info calls Log with the InfoLevel level.
 func (L *Logger) Info(msg string, args ...interface{}) {
+	L.preCallFunc()
 	L.log(InfoLevel, msg, args)
 }
 
 // Info0 calls Log0 with the InfoLevel level.
 func (L *Logger) Info0(msg string) {
+	L.preCallFunc()
 	L.log0(InfoLevel, msg)
 }
 
 // Info1 calls Log1 with the InfoLevel level.
 func (L *Logger) Info1(msg string, arg0 interface{}) {
+	L.preCallFunc()
 	L.log1(InfoLevel, msg, arg0)
 }
 
 // Info2 calls Log2 with the InfoLevel level.
 func (L *Logger) Info2(msg string, arg0, arg1 interface{}) {
+	L.preCallFunc()
 	L.log2(InfoLevel, msg, arg0, arg1)
 }
 
 // Info3 calls Log3 with the InfoLevel level.
 func (L *Logger) Info3(msg string, arg0, arg1, arg2 interface{}) {
+	L.preCallFunc()
 	L.log3(InfoLevel, msg, arg0, arg1, arg2)
 }
 
 // Info4 calls Log4 with the InfoLevel level.
 func (L *Logger) Info4(msg string, arg0, arg1, arg2, arg3 interface{}) {
+	L.preCallFunc()
 	L.log4(InfoLevel, msg, arg0, arg1, arg2, arg3)
 }
 
@@ -582,31 +633,37 @@ func (L *Logger) Info4(msg string, arg0, arg1, arg2, arg3 interface{}) {
 
 // Warn calls Log with the WarnLevel level.
 func (L *Logger) Warn(msg string, args ...interface{}) {
+	L.preCallFunc()
 	L.log(WarnLevel, msg, args)
 }
 
 // Warn0 calls Log0 with the WarnLevel level.
 func (L *Logger) Warn0(msg string) {
+	L.preCallFunc()
 	L.log0(WarnLevel, msg)
 }
 
 // Warn1 calls Log1 with the WarnLevel level.
 func (L *Logger) Warn1(msg string, arg0 interface{}) {
+	L.preCallFunc()
 	L.log1(WarnLevel, msg, arg0)
 }
 
 // Warn2 calls Log2 with the WarnLevel level.
 func (L *Logger) Warn2(msg string, arg0, arg1 interface{}) {
+	L.preCallFunc()
 	L.log2(WarnLevel, msg, arg0, arg1)
 }
 
 // Warn3 calls Log3 with the WarnLevel level.
 func (L *Logger) Warn3(msg string, arg0, arg1, arg2 interface{}) {
+	L.preCallFunc()
 	L.log3(WarnLevel, msg, arg0, arg1, arg2)
 }
 
 // Warn4 calls Log4 with the WarnLevel level.
 func (L *Logger) Warn4(msg string, arg0, arg1, arg2, arg3 interface{}) {
+	L.preCallFunc()
 	L.log4(WarnLevel, msg, arg0, arg1, arg2, arg3)
 }
 
@@ -616,36 +673,43 @@ func (L *Logger) Warn4(msg string, arg0, arg1, arg2, arg3 interface{}) {
 
 // Error calls Log with the ErrorLevel level.
 func (L *Logger) Error(msg string, args ...interface{}) {
+	L.preCallFunc()
 	L.log(ErrorLevel, msg, args)
 }
 
 // Error0 calls Log0 with the ErrorLevel level.
 func (L *Logger) Error0(msg string) {
+	L.preCallFunc()
 	L.log0(ErrorLevel, msg)
 }
 
 // Error1 calls Log1 with the ErrorLevel level.
 func (L *Logger) Error1(msg string, arg0 interface{}) {
+	L.preCallFunc()
 	L.log1(ErrorLevel, msg, arg0)
 }
 
 // Error2 calls Log2 with the ErrorLevel level.
 func (L *Logger) Error2(msg string, arg0, arg1 interface{}) {
+	L.preCallFunc()
 	L.log2(ErrorLevel, msg, arg0, arg1)
 }
 
 // Error3 calls Log3 with the ErrorLevel level.
 func (L *Logger) Error3(msg string, arg0, arg1, arg2 interface{}) {
+	L.preCallFunc()
 	L.log3(ErrorLevel, msg, arg0, arg1, arg2)
 }
 
 // Error4 calls Log4 with the ErrorLevel level.
 func (L *Logger) Error4(msg string, arg0, arg1, arg2, arg3 interface{}) {
+	L.preCallFunc()
 	L.log4(ErrorLevel, msg, arg0, arg1, arg2, arg3)
 }
 
 // LogErr logs the given error at ErrorLevel
 func (L *Logger) LogErr(err error) {
+	L.preCallFunc()
 	L.log0(ErrorLevel, err.Error())
 }
 
@@ -660,9 +724,7 @@ func (L *Logger) createEventFromCaller(level Level, msg string, args []interface
 	pc, file, line, _ := runtime.Caller(caller + 1)
 	f := runtime.FuncForPC(pc)
 	var funcname string
-	if f == nil {
-		funcname = ""
-	} else {
+	if f != nil {
 		funcname = f.Name()
 	}
 	return L.CreateEvent(time.Now(), level, msg, args, funcname, file, line)
