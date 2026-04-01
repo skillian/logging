@@ -15,6 +15,9 @@ const (
 	// EverythingLevel will capture every log level
 	EverythingLevel Level = Level(math.MinInt8)
 
+	// Nothing level logs nothing.
+	NothingLevel Level = Level(math.MaxInt8)
+
 	levelMask = (1 << (8 * unsafe.Sizeof(Level(0)))) - 1
 )
 

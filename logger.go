@@ -2,7 +2,6 @@ package logging
 
 import (
 	"context"
-	"math/bits"
 	"runtime"
 	"strconv"
 	"strings"
@@ -72,36 +71,32 @@ type logPool struct {
 	freeEvents []*Event
 }
 
-const cacheLinePadSize = unsafe.Sizeof(cpu.CacheLinePad{})
+const (
+	cacheLinePadSize   = int(unsafe.Sizeof(cpu.CacheLinePad{}))
+	ifaceSize          = int(unsafe.Sizeof(any(nil)))
+	ifacesPerCacheLine = cacheLinePadSize / ifaceSize
+)
 
 func (p *logPool) getArgs() (args []interface{}) {
 	p.mu.Lock()
 	if len(p.freeArgs) == 0 {
-		p.freeArgs = append(p.freeArgs[:cap(p.freeArgs)], nil)
-		p.freeArgs = p.freeArgs[:cap(p.freeArgs)]
-		// ifacePerCacheLine is 8 on 32-bit systems and 4 on
-		// 64-bit systems.  We use this later when we
-		// allocate a slice of args to align the args to a cache
-		// line so that events can be created in parallel and
-		// avoid "false sharing."
-		const ifacePerCacheLine = int(cacheLinePadSize / (bits.UintSize >> 2))
-		// add one so we can manually align to a cache line
-		cache := make([]interface{}, len(p.freeArgs)+(ifacePerCacheLine-1))
+		p.freeArgs = append(p.freeArgs, nil)[:0]
+		expectedLen := (4 << 10) * cap(p.freeArgs) / ifacesPerCacheLine
+		batch := make([]any, expectedLen+(ifacesPerCacheLine-1))
 		pinner := runtime.Pinner{}
-		pinner.Pin(&cache[0])
+		pinner.Pin(&batch[0])
 		{
-			sd := unsafereflect.SliceDataOf(unsafe.Pointer(&cache))
-			data := uintptr(sd.Data)
-			inc := uintptr(cacheLinePadSize-(data%cacheLinePadSize)) % cacheLinePadSize
-			sd.Data = unsafe.Add(sd.Data, inc)
-			sd.Len = len(p.freeArgs)
-			sd.Len = len(p.freeArgs)
+			sh := unsafereflect.SliceDataOf(unsafe.Pointer(&batch))
+			offset := uintptr(ifacesPerCacheLine * ifaceSize)
+			offset = (offset - (uintptr(sh.Data) % ((1 << offset) - 1))) % offset
+			sh.Data = unsafe.Add(sh.Data, offset)
+			sh.Len = expectedLen
+			sh.Cap = expectedLen
+			pinner.Unpin()
 		}
-		pinner.Unpin()
-		for i := range p.freeArgs {
-			start := i * ifacePerCacheLine
-			end := start + ifacePerCacheLine
-			p.freeArgs[i] = cache[start:start:end]
+		for i := 0; i <= len(batch)-ifacesPerCacheLine; i += ifacesPerCacheLine {
+			end := i + ifacesPerCacheLine
+			p.freeArgs = append(p.freeArgs, batch[i:i:end])
 		}
 	}
 	args = p.freeArgs[len(p.freeArgs)-1]
