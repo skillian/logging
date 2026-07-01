@@ -104,8 +104,9 @@ type WriterHandler struct {
 	HandlerCommon
 
 	// L is the mutex that protects the writer from concurrent access.
-	L sync.Locker
-	w io.Writer
+	L    sync.Locker
+	w    io.Writer
+	sync func() error
 }
 
 // LockHandler is protected with a sync.Locker
@@ -133,11 +134,20 @@ func NewWriterHandler(w io.Writer, lock sync.Locker) *WriterHandler {
 	if lock == nil {
 		lock = dummyLock{}
 	}
-	return &WriterHandler{
+	wh := &WriterHandler{
 		HandlerCommon: HandlerCommon{},
 		L:             lock,
 		w:             w,
 	}
+	switch fn := w.(type) {
+	case interface{ Sync() error }:
+		wh.sync = fn.Sync
+	case interface{ Flush() error }:
+		wh.sync = fn.Flush
+	default:
+		wh.sync = func() error { return nil }
+	}
+	return wh
 }
 
 // Emit implements the Handler interface.
@@ -146,6 +156,9 @@ func (wh *WriterHandler) Emit(event *Event) {
 	defer wh.L.Unlock()
 	if event.Level >= wh.level {
 		_, err := fmt.Fprint(wh.w, wh.formatter.Format(event))
+		if err == nil {
+			err = wh.sync()
+		}
 		if err != nil {
 			panic(err)
 		}

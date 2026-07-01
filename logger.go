@@ -2,6 +2,7 @@ package logging
 
 import (
 	"context"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -13,7 +14,6 @@ import (
 	"golang.org/x/sys/cpu"
 
 	"github.com/skillian/errors"
-	"github.com/skillian/unsafereflect"
 )
 
 // Logger objects expose methods to log events to added handlers if the event
@@ -86,10 +86,11 @@ func (p *logPool) getArgs() (args []interface{}) {
 		pinner := runtime.Pinner{}
 		pinner.Pin(&batch[0])
 		{
-			sh := unsafereflect.SliceDataOf(unsafe.Pointer(&batch))
+			sh := (*reflect.SliceHeader)(unsafe.Pointer(&batch))
+			//sh := unsafereflect.SliceDataOf(unsafe.Pointer(&batch))
 			offset := uintptr(ifacesPerCacheLine * ifaceSize)
 			offset = (offset - (uintptr(sh.Data) % ((1 << offset) - 1))) % offset
-			sh.Data = unsafe.Add(sh.Data, offset)
+			sh.Data = uintptr(unsafe.Add(unsafe.Pointer(sh.Data), offset))
 			sh.Len = expectedLen
 			sh.Cap = expectedLen
 			pinner.Unpin()
